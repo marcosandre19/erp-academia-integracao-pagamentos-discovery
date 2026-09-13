@@ -1,0 +1,28 @@
+Você é um arquiteto de software sênior. Leia docs/descricao.md e
+docs/lacunas.md antes de qualquer coisa.
+
+Tarefa: gerar o diagrama estrutural C4 nível 2 (containers) em Mermaid,
+usando a sintaxe C4Container do Mermaid.
+
+Regras críticas:
+- Use apenas o nível container; não misture níveis, não liste endpoints.
+- Marque gateway de pagamento, sistema de catraca e parceiros como
+  sistemas externos.
+- Respeite as restrições da descrição: detalhes do gateway não vazam
+  para o domínio; API pública é o único caminho de parceiros; MCP
+  consome a API pública, nunca o banco.
+- Declare as suposições adotadas ANTES do código, como comentários no
+  topo do arquivo (%% H01..., %% H02...), referenciando as hipóteses
+  do lacunas.md.
+- Não invente containers "por boas práticas" (cache, etc.) que não
+  estejam sustentados pela descrição.
+
+Entregáveis:
+1) Criar o arquivo diagramas/containers.mmd com o código Mermaid.
+2) Atualizar o README.md: incluir o diagrama em um bloco ```mermaid
+   (para o GitHub renderizar) na seção de diagrama estrutural, com as
+   suposições listadas logo acima dele.
+3) Adicionar ao README um checklist de revisão de 8 a 12 itens focado
+   em limites, dependências e vazamentos.
+
+Não faça commit; vou revisar antes.
