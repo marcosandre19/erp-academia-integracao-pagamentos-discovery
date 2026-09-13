@@ -103,3 +103,161 @@ C4Container
 - [ ] As lacunas ainda abertas (ex.: LC10 — autenticação de parceiros)
       permanecem registradas como lacunas, sem terem sido "resolvidas"
       silenciosamente no diagrama?
+
+## Diagrama comportamental — sequência da jornada crítica
+
+Jornada: recebimento e processamento do webhook de confirmação de
+pagamento, do POST do gateway até a liberação de acesso e o estado
+disponível na API Pública. Fonte:
+[`diagramas/sequencia-webhook-pagamento.mmd`](diagramas/sequencia-webhook-pagamento.mmd).
+Os participantes são exatamente os containers do diagrama estrutural;
+o Servidor MCP não aparece por estar fora da jornada crítica (H06).
+
+### Suposições adotadas (H01–H08 herdadas do estrutural; H09–H10 novas)
+
+- **H01–H08** — as mesmas do diagrama de containers (acima), em
+  especial: fila real (H01), 200 = recebimento durável (H02),
+  deduplicação no Processador com registro durável (H03), polling como
+  único modo de notificação (H05), REST/SOAP encapsulado no Módulo de
+  Acesso (H07), reconciliação e DLQ como mecanismos de infraestrutura
+  (H08).
+- **H09 (L03/L04 em aberto)** — Política de retry do gateway, SLA de
+  liberação e parâmetros de backoff não são conhecidos: todo limite
+  aparece de forma simbólica ("tentativas/timeout configurados"),
+  nunca como número.
+- **H10 (nova — validar com fornecedor)** — O comando de liberação na
+  catraca é declarativo/idempotente (define o estado "liberado");
+  reenviá-lo no retry não duplica efeito. Se o fornecedor não garantir
+  isso, o retry da catraca precisa de proteção própria.
+
+Lacunas não resolvidas que afetam o desenho: **L03** e **L04**
+(representadas simbolicamente via H09), **L06** (só polling aparece —
+H05) e **LC10** (autenticação do parceiro no polling não desenhada).
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant GW as Gateway de Pagamento (externo)
+    participant WR as Webhook Receiver
+    participant FE as Fila de Eventos
+    participant PR as Processador de Eventos
+    participant MF as Módulo Financeiro
+    participant MA as Módulo de Acesso
+    participant CT as Sistema de Catraca/Acesso (externo)
+    participant DB as Banco de Dados do ERP
+    participant AP as API Pública
+    participant PC as Parceiros Consumidores (externo)
+
+    %% ---------- 1. Recebimento durável ----------
+    GW->>WR: POST webhook de confirmação de pagamento (assinado)
+    activate WR
+    WR->>WR: Valida assinatura e traduz para evento interno
+    Note right of WR: Fronteira anticorrupção: payload e códigos do gateway não passam daqui (restrição da descrição)
+    WR->>FE: Publica evento interno (carrega o ID do evento do gateway)
+    WR-->>GW: 200 OK
+    deactivate WR
+    Note over GW,FE: H02 — o 200 confirma recebimento durável (evento enfileirado), NÃO o processamento completo
+
+    opt Retry do gateway (200 perdido ou política própria — L03 em aberto, H09)
+        GW->>WR: POST do MESMO webhook (mesmo ID de evento)
+        WR->>FE: Publica novamente — o receiver não deduplica (H03)
+        WR-->>GW: 200 OK
+        Note over WR,FE: A proteção contra duplicata NÃO está aqui: está na deduplicação durável do processador (passo do alt abaixo)
+    end
+
+    %% ---------- 2. Processamento idempotente ----------
+    FE->>PR: Entrega evento (at-least-once)
+    activate PR
+    PR->>DB: Consulta registro durável de eventos processados (chave = ID do evento do gateway — H03)
+
+    alt Evento inédito — caminho de sucesso
+        PR->>PR: Valida transição na máquina de estados do pagamento (Q4)
+        PR->>MF: Comanda a baixa do pagamento
+        activate MF
+        MF->>DB: Atualiza a situação financeira do aluno
+        MF-->>PR: Baixa confirmada
+        deactivate MF
+        PR->>MA: Comanda a liberação de acesso
+        activate MA
+        Note right of MA: Variação REST/SOAP por fornecedor encapsulada nos adaptadores (H07)
+        alt Catraca disponível
+            MA->>CT: Comando de liberação do aluno
+            CT-->>MA: Liberação confirmada
+            MA-->>PR: Acesso liberado
+        else Catraca indisponível — falha parcial (Q7)
+            loop Retry com backoff exponencial — tentativas e timeout "configurados", sem números (H09)
+                MA->>CT: Reenvia comando de liberação
+                CT--xMA: Falha / sem resposta
+            end
+            Note right of MA: Reenvio seguro: comando declarativo de estado, idempotente no fornecedor (H10 — validar)
+            MA-->>PR: Falha definitiva na liberação
+            PR->>FE: Publica o evento na DLQ (mecanismo da infraestrutura — H08)
+            Note over PR,FE: Alerta para liberação MANUAL — log/alerta apenas com IDs internos, nunca CPF ou dados financeiros (LGPD)
+            Note over MF,MA: A baixa financeira NÃO é revertida — efeitos independentes (Q7): quem pagou não perde a baixa porque a catraca caiu
+        end
+        deactivate MA
+        PR->>DB: Registra o evento como processado (registro durável — H03)
+        PR-->>FE: Ack — remove a mensagem da fila
+        Note right of PR: Ack só APÓS o registro durável: se o worker cair antes, a fila reentrega e a deduplicação decide
+    else Evento já processado — retry do gateway OU reentrega da fila
+        Note over PR,DB: AQUI atua a idempotência: o ID do evento já consta no registro durável → nenhum efeito é reexecutado (nem baixa, nem liberação)
+        PR-->>FE: Ack — descarta a duplicata sem efeito colateral
+    end
+    deactivate PR
+
+    %% ---------- 3. Evento fora de ordem ----------
+    opt Estorno chega antes da confirmação (Q4 — o estorno em si está fora do escopo)
+        FE->>PR: Entrega evento de estorno
+        activate PR
+        PR->>DB: Consulta estado atual do pagamento
+        PR->>PR: Máquina de estados: transição inválida (estorno sem confirmação prévia)
+        PR->>FE: Encaminha para reconciliação — não aplica, não descarta (H08)
+        deactivate PR
+        Note over PR,FE: Alerta para reconciliação/auditoria, sem PII (LGPD)
+    end
+
+    %% ---------- 4. Estado disponível na API Pública ----------
+    PC->>AP: Consulta a situação do aluno (polling — H05)
+    activate AP
+    AP->>DB: Lê a situação atualizada (H04)
+    AP-->>PC: Situação do aluno (contrato REST versionado)
+    deactivate AP
+    Note over AP,PC: Autenticação do parceiro: lacuna LC10, não desenhada
+```
+
+## Checklist de revisão — sequência do webhook de pagamento
+
+- [ ] Os participantes são exatamente os containers do diagrama
+      estrutural (mesmos nomes, mesmos limites), sem participantes
+      inventados — e a ausência do Servidor MCP está justificada (H06)?
+- [ ] A ordem das interações está correta: validação de assinatura →
+      enfileiramento → 200 → consumo → deduplicação → baixa →
+      liberação → registro durável → ack?
+- [ ] A semântica do 200 (recebimento durável, não processamento
+      completo — H02) está visível no desenho, antes de qualquer
+      efeito de domínio?
+- [ ] **Retry do gateway**: consigo apontar no diagrama o mecanismo que
+      impede efeito duplicado (deduplicação no Processador contra o
+      registro durável, chave = ID do evento — H03)?
+- [ ] **Reentrega da fila (at-least-once)**: consigo apontar o mesmo
+      mecanismo cobrindo a queda do worker entre efeito e ack (ack só
+      após registro durável)?
+- [ ] **Retry da catraca**: consigo apontar por que o reenvio não
+      duplica efeito (comando declarativo/idempotente — H10) e essa
+      hipótese está marcada como "a validar"?
+- [ ] Os efeitos colaterais (baixa financeira e liberação de acesso)
+      estão desenhados como independentes — a falha da catraca NÃO
+      reverte a baixa (Q7)?
+- [ ] O caminho de falha parcial termina em estado observável: DLQ +
+      alerta para liberação manual, e não em falha silenciosa?
+- [ ] O evento fora de ordem vai para reconciliação com alerta, sem
+      ser aplicado nem descartado (Q4), e sem expandir para o fluxo
+      completo de estorno (fora do escopo)?
+- [ ] Nenhum SLA, timeout ou número de tentativas aparece como número
+      inventado — todos os limites são simbólicos ("configurado") com
+      a lacuna correspondente registrada (H09, L03/L04)?
+- [ ] Todo ponto de log/alerta indicado está livre de PII (CPF, dados
+      financeiros) — apenas IDs internos (LGPD)?
+- [ ] Detalhes do gateway morrem no Webhook Receiver e a variação
+      REST/SOAP morre no Módulo de Acesso — nenhuma nota ou mensagem
+      vaza esses detalhes para outros participantes?

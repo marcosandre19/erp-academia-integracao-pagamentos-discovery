@@ -1,0 +1,59 @@
+Você é um arquiteto de software sênior. Leia docs/descricao.md,
+docs/lacunas.md (com as respostas de trabalho) e
+diagramas/containers.mmd antes de qualquer coisa. O diagrama de
+sequência deve ser coerente com os containers já documentados — mesmos
+nomes, mesmos limites; não invente participantes que não existem no
+estrutural.
+
+Tarefa: gerar o diagrama comportamental (sequenceDiagram do Mermaid)
+da jornada crítica "recebimento e processamento do webhook de
+confirmação de pagamento", do POST do gateway até a liberação de
+acesso e disponibilidade do estado na API pública.
+
+Regras críticas:
+- Declare as suposições adotadas ANTES do código, como comentários
+  (%% H...), referenciando as hipóteses do 02-lacunas.md. Se uma
+  lacuna não resolvida afetar o desenho, liste-a antes e indique qual
+  suposição foi adotada.
+- Não invente SLAs, timeouts numéricos ou métricas. Se precisar
+  representar um timeout, nomeie-o simbolicamente (ex.: "timeout
+  configurado") e registre como lacuna, nunca como número no desenho.
+- A semântica do 200 ao gateway é recebimento durável (Q2), não
+  processamento completo — o diagrama deve deixar isso visível.
+- Detalhes do gateway não vazam além do Webhook Receiver; a variação
+  REST/SOAP da catraca fica encapsulada no Módulo de Acesso.
+
+O diagrama DEVE conter, como ramos alt/opt explícitos:
+1) Caminho de sucesso completo (webhook → fila → deduplicação → baixa
+   financeira → liberação de acesso → estado disponível na API).
+2) Caminho de webhook duplicado/reentregue: o retry do gateway e a
+   reentrega da fila (at-least-once) chegam ao mesmo resultado sem
+   efeito duplicado — anote com notas (Note over/right of) ONDE a
+   idempotência atua e POR QUÊ (chave = ID do evento, registro durável
+   de eventos processados).
+3) Caminho de falha na catraca: retry com backoff, esgotamento, DLQ e
+   alerta para liberação manual — deixando visível que a baixa
+   financeira NÃO é revertida (efeitos independentes, Q7).
+4) (opt) Evento fora de ordem: estorno chegando antes da confirmação
+   vai para reconciliação com alerta, sem aplicar nem descartar (Q4).
+
+Fora de escopo: não modele matrícula, geração de cobrança, estorno
+completo ou notificação ativa de parceiros (webhook de saída) — apenas
+o que está no escopo declarado da descrição.
+
+Entregáveis:
+1) Criar diagramas/sequencia-webhook-pagamento.mmd.
+2) Atualizar o README.md: incluir o diagrama em bloco ```mermaid na
+   seção do diagrama comportamental, com as suposições listadas logo
+   acima dele.
+3) Adicionar ao README um checklist de revisão de 8 a 12 itens
+   específico deste diagrama, cobrindo: ordem das interações, cada
+   retry com seu mecanismo anti-duplicação apontável, efeitos
+   colaterais e sua independência, falhas parciais e observabilidade
+   mínima (onde logar/alertar sem expor PII).
+
+Saída esperada: um diagrama em que um revisor consiga apontar, em cada
+retry (do gateway, da fila e da catraca), qual mecanismo impede efeito
+duplicado. Se não conseguir apontar, o diagrama está incompleto.
+
+Não faça commit; vou revisar antes.
