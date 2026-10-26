@@ -14,7 +14,7 @@ Vamos pensar passo a passo:
    falha, com os dados fictícios (payloads) que cada um precisa.
 4. Para cada teste, declare em comentário qual regra de negócio ele
    protege.
-5. testes devem ser gravados em @src/test/java/cot
+5. testes devem ser gravados em @forum-testes-integracao/stub/src/test/java/cot
 
 Regras do fluxo (invariantes do projeto):
 - I01: o processamento do webhook é idempotente — reentrega nunca

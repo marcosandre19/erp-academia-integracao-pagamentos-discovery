@@ -23,7 +23,7 @@ Restrições:
   registre como PENDENTE em comentário.
 - Valores esperados vêm da especificação, nunca da resposta da
   própria API em outra chamada.
-- A resposta deve conter apenas código Java, em @src/test/java/blackbox
+- A resposta deve conter apenas código Java, em @forum-testes-integracao/stub/src/test/java/blackbox
 
   Especificação:
   @openapi/erp-pagamentos.yaml
