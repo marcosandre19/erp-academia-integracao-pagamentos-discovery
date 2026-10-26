@@ -1,0 +1,209 @@
+# ============================================================
+# Especificação OpenAPI 3.0 — recorte mínimo
+# Fonte: docs/descricao.md + docs/lacunas.md + diagramas/containers.mmd
+# Dados fictícios. Campos cuja definição ainda é lacuna estão
+# marcados com "PENDENTE: <lacuna>".
+# ============================================================
+openapi: 3.0.3
+info:
+  title: ERP de Academias — Integração de Pagamentos (recorte)
+  description: >
+    Dois endpoints do recorte documentado: recebimento do webhook de
+    confirmação de pagamento do gateway (Webhook Receiver) e consulta
+    da situação do aluno por parceiros (API Pública). A API pública é
+    contrato e exige versionamento.
+  version: 1.0.0
+  contact:
+    name: Equipe de Integrações (fictício)
+    email: integracoes@exemplo-academia.com.br
+
+servers:
+  - url: https://api.exemplo-academia.com.br/v1
+    description: Servidor fictício (a API pública é versionada — restrição da descrição)
+
+tags:
+  - name: Webhooks
+    description: Recebimento de eventos do gateway de pagamento (Webhook Receiver)
+  - name: API Pública
+    description: Consulta de parceiros (polling, H05)
+
+paths:
+  /webhooks/pagamentos:
+    post:
+      summary: Recebe o webhook de confirmação de pagamento do gateway
+      # PENDENTE: LC01 — modelo de processamento (fila real vs. síncrono)
+      # não confirmado; se o processamento for síncrono, a semântica do
+      # 200 descrito abaixo muda.
+      description: >
+        O Webhook Receiver valida a assinatura HMAC do header, traduz o
+        evento para o formato interno (detalhes do gateway não vazam
+        para o domínio) e o enfileira. O 200 confirma recebimento
+        durável (evento aceito e enfileirado), NÃO o processamento
+        completo — semântica adotada como hipótese de trabalho (LC02/H02),
+        condicionada ao modelo assíncrono (LC01).
+      operationId: receberWebhookPagamento
+      tags: [Webhooks]
+      parameters:
+        - name: X-Assinatura
+          in: header
+          required: true
+          description: >
+            Assinatura HMAC do corpo da requisição, gerada pelo gateway.
+            O mecanismo exato (algoritmo, segredo, formato) ainda não foi
+            confirmado (L01 da descrição).
+          schema:
+            type: string
+          example: "hmac-sha256=3f1a9c0ffee..."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EventoPagamentoGateway"
+      responses:
+        "200":
+          description: >
+            Recebimento durável — evento validado e enfileirado.
+            Não confirma a baixa do pagamento nem a liberação de acesso.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecebimentoWebhook"
+        "400":
+          description: Payload malformado (JSON inválido ou campos obrigatórios ausentes).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Erro"
+              example:
+                erro: "payload_malformado"
+                mensagem: "Corpo da requisição não é um evento válido."
+        "401":
+          description: Assinatura HMAC inválida ou ausente.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Erro"
+              example:
+                erro: "assinatura_invalida"
+                mensagem: "A assinatura do webhook não pôde ser verificada."
+
+  /alunos/{id}/situacao:
+    get:
+      summary: Consulta a situação do aluno (API Pública, polling do parceiro)
+      description: >
+        Expõe a situação do aluno a parceiros consumidores. Único caminho
+        de acesso externo ao domínio; parceiros não acessam módulos
+        internos. Notificação nesta fase é apenas por polling (H05).
+      operationId: consultarSituacaoAluno
+      tags: [API Pública]
+      security:
+        - autenticacaoParceiro: []   # PENDENTE: LC10 — mecanismo de autenticação dos parceiros (API key? OAuth?) não definido
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Identificador do aluno no ERP.
+          schema:
+            type: string
+          example: "alu-00042"
+      responses:
+        "200":
+          description: Situação atual do aluno.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SituacaoAluno"
+        "401":
+          description: Parceiro não autenticado.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Erro"
+              example:
+                erro: "nao_autenticado"
+                mensagem: "Credenciais ausentes ou inválidas."
+        "404":
+          description: Aluno inexistente.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Erro"
+              example:
+                erro: "aluno_inexistente"
+                mensagem: "Nenhum aluno encontrado para o id informado."
+
+components:
+  securitySchemes:
+    # PENDENTE: LC10 — a descrição declara a API pública como contrato,
+    # mas não define o mecanismo de autenticação/autorização dos
+    # parceiros (API key? OAuth?). Esquema abaixo é placeholder.
+    autenticacaoParceiro:
+      type: apiKey
+      in: header
+      name: X-Api-Key
+
+  schemas:
+    EventoPagamentoGateway:
+      type: object
+      description: >
+        Evento de confirmação de pagamento emitido pelo gateway.
+        O formato exato do payload não foi confirmado (L01 da descrição);
+        os campos abaixo são os mínimos sustentados pela documentação
+        (chave de idempotência e fallback, conforme Q3 de lacunas.md).
+      required:
+        - idEvento
+        - tipoEvento
+        - idTransacao
+      properties:
+        idEvento:
+          type: string
+          description: ID do evento no gateway — chave de idempotência (Q3).
+          example: "evt-9f8e7d6c"
+        tipoEvento:
+          type: string
+          description: Tipo do evento (compõe a chave de fallback com idTransacao, Q3).
+          example: "pagamento_confirmado"
+        idTransacao:
+          type: string
+          description: ID da transação no gateway (fallback de idempotência, Q3).
+          example: "trx-123456"
+
+    RecebimentoWebhook:
+      type: object
+      # PENDENTE: LC01 — modelo de processamento não confirmado; o
+      # significado desta resposta depende de o enfileiramento existir
+      # de fato (fila real) ou não.
+      description: Confirmação de recebimento durável do evento.
+      properties:
+        recebido:
+          type: boolean
+          example: true
+
+    SituacaoAluno:
+      type: object
+      description: Situação do aluno exposta a parceiros. Sem PII (LGPD).
+      required:
+        - idAluno
+        - situacao
+      properties:
+        idAluno:
+          type: string
+          example: "alu-00042"
+        situacao:
+          type: string
+          description: Situação financeira do aluno conforme o ERP.
+          example: "em_dia"
+
+    Erro:
+      type: object
+      required:
+        - erro
+        - mensagem
+      properties:
+        erro:
+          type: string
+          description: Código do erro.
+        mensagem:
+          type: string
+          description: Descrição legível, sem PII (LGPD).
