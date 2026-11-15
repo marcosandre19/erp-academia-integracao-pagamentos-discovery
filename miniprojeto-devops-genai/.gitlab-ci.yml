@@ -42,8 +42,14 @@ ai_diagnosis:
   image: maven:3.9-eclipse-temurin-17
   when: on_failure
   dependencies:
-    - test # baixa os artefatos do job test (maven-test.log)
+    - test # baixa os artefatos do job test (maven-test.log + surefire)
   script:
-    # TODO: script criado na próxima etapa do miniprojeto
-    # (miniprojeto-devops-genai/agente/diagnostico.sh)
+    # o coletor de contexto é Python; a imagem maven não traz python3
+    - command -v python3 >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq python3 >/dev/null)
+    # sem claude CLI o script não falha: grava o prompt como artefato
     - bash miniprojeto-devops-genai/agente/diagnostico.sh maven-test.log
+  artifacts:
+    when: always
+    expire_in: 1 week
+    paths:
+      - diagnostico/

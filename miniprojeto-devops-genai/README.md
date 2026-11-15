@@ -14,7 +14,9 @@ miniprojeto-devops-genai/
 ├── README.md                        # este arquivo
 ├── .gitlab-ci.yml                   # equivalente GitLab CI (demonstrativo — o lab oficial é GitLab)
 └── agente/
-    └── diagnostico.sh               # (próxima etapa) script de diagnóstico por IA
+    ├── coleta_contexto.py           # monta e SANITIZA o prompt-diagnostico.md
+    ├── instrucoes-parecer.md        # instruções fixas do agente (formato + regras)
+    └── diagnostico.sh               # orquestra: coleta → claude -p → summary/PR
 ```
 
 ## Como funciona
@@ -28,7 +30,9 @@ miniprojeto-devops-genai/
   O job traduz `true` para `EVENT_REGISTRY_MODE=deferred`, a config que o
   stub lê (ver seção abaixo).
 - **Job `ai-diagnosis`**: só roda em falha (`if: failure()` / `when: on_failure`),
-  baixa o artefato do log e chama `agente/diagnostico.sh`.
+  baixa o artefato do log e chama `agente/diagnostico.sh` (detalhes na seção
+  "Agente de diagnóstico" abaixo). O diretório `diagnostico/` (prompt e, se
+  gerado, parecer) é publicado como artefato.
 
 ## Injeção de falha (`inject_bug` → `EVENT_REGISTRY_MODE=deferred`)
 
@@ -69,6 +73,53 @@ job `test` exporta `EVENT_REGISTRY_MODE` (`deferred` se `true`, senão `sync`).
 A flag é lida uma única vez na construção do controller; a documentação do
 seu propósito fica **apenas aqui**, de propósito: o diagnóstico por IA deve
 encontrar a causa pelo log e pelo código, sem dica em comentário.
+
+## Agente de diagnóstico
+
+Dois scripts em `agente/`, chamados pelo job `ai-diagnosis`:
+
+**`coleta_contexto.py`** monta `diagnostico/prompt-diagnostico.md` com, nesta
+ordem:
+
+1. o recorte das falhas do log do Maven (blocos `<<< FAILURE!` com stack
+   trace + resumo `[ERROR] Failures:`) e os relatórios surefire das classes
+   reprovadas — não o log inteiro;
+2. o git diff do PR atual (contra `origin/$GITHUB_BASE_REF`); fora de PR,
+   o working tree sujo ou o último commit;
+3. o conteúdo dos arquivos-fonte citados nos stack traces **e** dos módulos
+   do projeto relacionados a eles — imports e vizinhos de pacote (em Java,
+   dependência do mesmo pacote não gera `import`), pois a causa-raiz pode
+   não estar no traceback;
+4. sanitização obrigatória antes de gravar: tokens e chaves (`sk-`,
+   `glpat-`, `ghp_`, `AKIA`, JWT, `Bearer ...`, `Authorization:`,
+   `password=` etc.), e-mails e caminhos de usuário (`/home/...`,
+   `C:\Users\...`) são mascarados.
+
+**`diagnostico.sh`** envia o prompt ao Claude via `claude -p` (modo não
+interativo), com as instruções fixas de `instrucoes-parecer.md` — resposta
+obrigatoriamente nas seções `## Resumo`, `## Evidências (citando linhas do
+log)`, `## Causa-raiz`, `## Correção sugerida (diff mínimo)`, `## Como
+validar`, `## Riscos e premissas`, `## Confiança (alta/média/baixa + por
+quê)`, e com as regras: não alterar/sugerir alterar testes para passarem
+(hipótese de teste errado vai em Riscos); se a correção depender de decisão
+de negócio não tomada, apontá-la e PARAR; não inventar números, SLAs ou
+comportamento não evidenciado.
+
+O parecer vai para o `GITHUB_STEP_SUMMARY` e, quando o evento é
+`pull_request`, como comentário no PR via `gh api` com o `GITHUB_TOKEN`.
+
+### Sem claude CLI no runner (caminho usado neste projeto)
+
+Se o `claude` CLI não está disponível no runner, **o job não falha**: o
+`prompt-diagnostico.md` é publicado no artefato `diagnostico` e o step
+summary registra o aviso. O parecer é então gerado localmente — este é o
+caminho adotado aqui, já que o runner não tem o CLI nem credenciais de API:
+
+```bash
+# baixe o artefato "diagnostico" da execução reprovada e rode:
+claude -p "$(cat miniprojeto-devops-genai/agente/instrucoes-parecer.md)" \
+    < prompt-diagnostico.md > parecer-diagnostico.md
+```
 
 ## Resultados
 
