@@ -22,6 +22,9 @@ test:
     paths:
       - .m2/repository
   script:
+    # INJECT_BUG é o nome voltado a quem dispara o pipeline; o stub lê a
+    # config EVENT_REGISTRY_MODE (ver README.md deste diretório).
+    - export EVENT_REGISTRY_MODE=$([ "$INJECT_BUG" = "true" ] && echo deferred || echo sync)
     # pipefail garante que o exit code reprovador é o do Maven, não o do tee
     - set -o pipefail
     - mvn -B -f forum-testes-integracao/stub/pom.xml test 2>&1 | tee maven-test.log

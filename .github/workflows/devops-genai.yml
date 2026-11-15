@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       inject_bug:
-        description: "Injetar bug proposital no stub (INJECT_BUG=true)"
+        description: "Injetar bug proposital no stub (quebra a deduplicação do webhook)"
         type: boolean
         default: false
 
@@ -20,8 +20,11 @@ jobs:
   test:
     runs-on: ubuntu-latest
     env:
-      # Em workflow_dispatch vale o input; em pull_request fica false.
-      INJECT_BUG: ${{ github.event_name == 'workflow_dispatch' && inputs.inject_bug == true }}
+      # inject_bug é o nome voltado a quem dispara o pipeline; o stub lê a
+      # config EVENT_REGISTRY_MODE (ver miniprojeto-devops-genai/README.md).
+      # Em workflow_dispatch, inject_bug=true vira "deferred"; em
+      # pull_request fica sempre "sync" (padrão).
+      EVENT_REGISTRY_MODE: ${{ (github.event_name == 'workflow_dispatch' && inputs.inject_bug == true) && 'deferred' || 'sync' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4

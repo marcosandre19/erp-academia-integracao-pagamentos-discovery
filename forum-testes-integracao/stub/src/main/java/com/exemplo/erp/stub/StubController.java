@@ -32,7 +32,16 @@ public class StubController {
     );
 
     private final Set<String> eventosProcessados = ConcurrentHashMap.newKeySet();
+    private final Map<String, Integer> baixasPorEvento = new ConcurrentHashMap<>();
+    private final Map<String, String> situacaoAtualPorAluno =
+            new ConcurrentHashMap<>(SITUACAO_POR_ALUNO);
     private final ObjectMapper objectMapper = new ObjectMapper();
+
+    // Modo de registro dos eventos processados: "sync" (padrão) registra
+    // na própria requisição; "deferred" delega o registro ao pós-processamento.
+    private final boolean registroDiferido =
+            "deferred".equals(System.getProperty("EVENT_REGISTRY_MODE",
+                    System.getenv().getOrDefault("EVENT_REGISTRY_MODE", "sync")));
 
     @PostMapping("/webhooks/pagamentos")
     public ResponseEntity<Map<String, Object>> receberWebhookPagamento(
@@ -59,7 +68,13 @@ public class StubController {
         }
 
         // Idempotência: duplicata não reprocessa, mas a resposta é a mesma.
-        eventosProcessados.add(evento.get("idEvento").asText());
+        String idEvento = evento.get("idEvento").asText();
+        if (!eventosProcessados.contains(idEvento)) {
+            processarBaixa(idEvento);
+            if (!registroDiferido) {
+                eventosProcessados.add(idEvento);
+            }
+        }
 
         return ResponseEntity.ok(Map.of("recebido", true));
     }
@@ -74,13 +89,26 @@ public class StubController {
                     "Credenciais ausentes ou inválidas.");
         }
 
-        String situacao = SITUACAO_POR_ALUNO.get(id);
+        String situacao = situacaoAtualPorAluno.get(id);
         if (situacao == null) {
             return erro(HttpStatus.NOT_FOUND, "aluno_inexistente",
                     "Nenhum aluno encontrado para o id informado.");
         }
 
         return ResponseEntity.ok(Map.of("idAluno", id, "situacao", situacao));
+    }
+
+    /**
+     * Baixa do pagamento. O payload do webhook não vincula o evento a um
+     * aluno (lacuna do contrato), então o stub aplica a baixa sempre sobre
+     * alu-00042; uma segunda baixa do mesmo evento deixa o aluno com
+     * crédito do valor pago em dobro.
+     */
+    private void processarBaixa(String idEvento) {
+        int baixas = baixasPorEvento.merge(idEvento, 1, Integer::sum);
+        if (baixas > 1) {
+            situacaoAtualPorAluno.put("alu-00042", "credito-" + idEvento);
+        }
     }
 
     private static boolean campoAusente(JsonNode no, String campo) {
