@@ -29,6 +29,10 @@ MAX_BYTES_FONTES_TOTAL = 400_000
 MAX_BYTES_LOG = 150_000
 MAX_BYTES_SUREFIRE = 40_000
 MAX_BYTES_DIFF = 200_000
+# Com orcamento ativo, espaco minimo garantido para a secao de fontes: um
+# diff grande (ex.: working tree sujo) nao pode expulsar o codigo de
+# producao do prompt — e la que a causa-raiz costuma estar.
+RESERVA_MIN_FONTES = 6_000
 
 DIRS_IGNORADOS = {".git", "target", "node_modules", "build", ".idea", ".m2"}
 
@@ -104,6 +108,49 @@ def recortar_falhas(texto_log):
     if not blocos:  # log sem marcadores conhecidos: ultimas linhas como fallback
         blocos.append("\n".join(linhas[-80:]))
     return blocos
+
+
+PADRAO_LINHA_FRAME = re.compile(r"^\s*at\s+\S")
+PADRAO_FRAME_PROJETO = re.compile(r"^\s*at\s+(?:blackbox|cot|com\.exemplo\.erp)\.")
+PADRAO_TESTE_REPROVADO = re.compile(
+    r"([\w$]+(?:\.[\w$]+)+)\s+--\s+Time elapsed:.*<<<\s+(?:FAILURE|ERROR)!")
+
+
+def podar_stack(texto):
+    """Poda frames de stack trace: mantem a mensagem de erro completa (linhas
+    que nao sao frame passam direto), as 3 primeiras frames de cada trecho
+    contiguo e TODAS as frames de classes do projeto; o resto vira uma unica
+    marca com a contagem do que foi omitido."""
+    linhas = texto.splitlines()
+    saida = []
+    i, n = 0, len(linhas)
+    while i < n:
+        if not PADRAO_LINHA_FRAME.match(linhas[i]):
+            saida.append(linhas[i])
+            i += 1
+            continue
+        trecho = []
+        while i < n and PADRAO_LINHA_FRAME.match(linhas[i]):
+            trecho.append(linhas[i])
+            i += 1
+        omitidas = 0
+        for posicao, frame in enumerate(trecho):
+            if posicao < 3 or PADRAO_FRAME_PROJETO.match(frame):
+                if omitidas:
+                    saida.append(f"\t[... {omitidas} frames de infraestrutura omitidas ...]")
+                    omitidas = 0
+                saida.append(frame)
+            else:
+                omitidas += 1
+        if omitidas:
+            saida.append(f"\t[... {omitidas} frames de infraestrutura omitidas ...]")
+    return "\n".join(saida)
+
+
+def testes_reprovados(texto):
+    """Nomes qualificados dos testes reprovados (linhas-cabecalho de falha),
+    usados para detectar relatorio surefire que so repete o recorte do log."""
+    return {m.group(1) for m in PADRAO_TESTE_REPROVADO.finditer(texto)}
 
 
 def relatorios_surefire(diretorio):
@@ -265,9 +312,18 @@ def main():
                      else Path.cwd())
 
     blocos_falha = recortar_falhas(texto_log)
-    surefire = relatorios_surefire(args.surefire_dir)
+    texto_falhas = podar_stack("\n\n".join(blocos_falha))
 
-    texto_falhas = "\n\n".join(blocos_falha)
+    # Dedup: um surefire cujos testes reprovados ja estao todos no recorte
+    # do log so repetiria os mesmos stack traces — entra apenas uma vez.
+    reprovados_no_log = testes_reprovados(texto_falhas)
+    surefire, surefire_omitidos = [], []
+    for nome_arquivo, texto in relatorios_surefire(args.surefire_dir):
+        if testes_reprovados(texto) - reprovados_no_log:
+            surefire.append((nome_arquivo, podar_stack(texto)))
+        else:
+            surefire_omitidos.append(nome_arquivo)
+
     texto_para_citacoes = texto_falhas + "\n" + "\n".join(t for _, t in surefire)
     nomes = classes_citadas(texto_para_citacoes)
 
@@ -296,20 +352,57 @@ def main():
         partes_falhas.append(f"### surefire: {nome_arquivo}\n```text\n"
                              + truncar(texto, MAX_BYTES_SUREFIRE, nome_arquivo)
                              + "\n```\n")
+    if surefire_omitidos:
+        partes_falhas.append(
+            "_(relatorios surefire omitidos por repetirem os stack traces "
+            "do recorte acima: " + ", ".join(surefire_omitidos) + ")_\n")
 
     partes_diff = [
         f"## 2. Diff ({rotulo_diff})\n",
         "```diff\n" + truncar(diff, MAX_BYTES_DIFF, "diff") + "\n```\n",
     ]
 
-    partes_fontes = [
+    # Sanitiza ANTES de qualquer uso do documento (o prompt pode ser enviado
+    # a um provedor externo); medidas de orcamento sempre sobre o texto limpo.
+    cab_sanit = sanitizar(cabecalho)
+    texto_sec1 = sanitizar("\n".join(partes_falhas))
+    texto_sec2 = sanitizar("\n".join(partes_diff))
+
+    cabeca_fontes = sanitizar("\n".join([
         "## 3. Fontes citados nos stack traces e modulos relacionados\n",
-        "Inclui tambem os modulos importados e os vizinhos de pacote "
-        "dos arquivos citados: a causa-raiz pode nao estar no "
-        "traceback.\n",
-    ]
-    total = 0
-    for fonte in fontes:
+        "Prioridade: codigo de producao primeiro, depois os arquivos "
+        "citados, depois o suporte — a causa-raiz pode nao estar no "
+        "traceback. Cada arquivo entra POR INTEIRO; o que nao cabe no "
+        "orcamento e apenas listado como omitido.\n",
+    ]))
+
+    def tam(texto):
+        return len(texto.encode("utf-8", errors="replace"))
+
+    if args.orcamento_bytes > 0:
+        # O diff so pode ocupar o que sobra depois da reserva das fontes.
+        maximo_diff = (args.orcamento_bytes - tam(cab_sanit)
+                       - tam(texto_sec1) - tam(cabeca_fontes)
+                       - RESERVA_MIN_FONTES - 400)
+        if maximo_diff > 0 and tam(texto_sec2) > maximo_diff:
+            texto_sec2 = truncar(texto_sec2, maximo_diff,
+                                 "diff (orcamento de tamanho do prompt)") \
+                + "\n```\n"
+        # 400 bytes de folga para separadores e eventual marca de truncamento
+        restante = (args.orcamento_bytes - tam(cab_sanit) - tam(texto_sec1)
+                    - tam(texto_sec2) - tam(cabeca_fontes) - 400)
+    else:
+        restante = MAX_BYTES_FONTES_TOTAL
+
+    citados_arquivos = set(iniciais)
+
+    def prioridade(fonte):
+        codigo_de_producao = 0 if "test" not in fonte.parts else 1
+        citado = 0 if fonte in citados_arquivos else 1
+        return (codigo_de_producao, citado, fontes.index(fonte))
+
+    blocos_fontes, omitidos = [], []
+    for fonte in sorted(fontes, key=prioridade):
         try:
             texto = ler(fonte)
         except OSError:
@@ -318,29 +411,37 @@ def main():
             rel = fonte.relative_to(repo_root)
         except ValueError:
             rel = fonte
-        corpo = truncar(texto, MAX_BYTES_POR_FONTE, str(rel))
-        total += len(corpo.encode("utf-8", errors="replace"))
-        if total > MAX_BYTES_FONTES_TOTAL:
-            partes_fontes.append("_(limite de tamanho das fontes atingido; "
-                                 "demais arquivos omitidos)_\n")
-            break
-        partes_fontes.append(
-            f"### {str(rel).replace(os.sep, '/')}\n```java\n{corpo}\n```\n")
+        rel = str(rel).replace(os.sep, "/")
+        bloco = sanitizar(f"### {rel}\n```java\n"
+                          + truncar(texto, MAX_BYTES_POR_FONTE, rel)
+                          + "\n```\n")
+        if tam(bloco) <= restante:
+            blocos_fontes.append(bloco)
+            restante -= tam(bloco) + 1
+        else:
+            omitidos.append(f"{rel} ({tam(bloco)} bytes)")
+    if omitidos:
+        blocos_fontes.append(sanitizar(
+            "_(fontes omitidos por nao caberem inteiros no orcamento: "
+            + "; ".join(omitidos) + ")_\n"))
 
-    # Sanitiza ANTES de qualquer uso do documento (o prompt pode ser enviado
-    # a um provedor externo); o orcamento e aplicado sobre o texto ja limpo.
+    texto_sec3 = "\n".join([cabeca_fontes] + blocos_fontes)
+
+    # Rede de seguranca: se sec1+sec2 sozinhas ja estourarem o orcamento,
+    # o corte por secao (fontes -> diff -> falhas) ainda se aplica.
     secoes = [
-        (sanitizar("\n".join(partes_falhas)), "falhas da suite"),
-        (sanitizar("\n".join(partes_diff)), "diff"),
-        (sanitizar("\n".join(partes_fontes)), "fontes"),
+        (texto_sec1, "falhas da suite"),
+        (texto_sec2, "diff"),
+        (texto_sec3, "fontes"),
     ]
-    documento = aplicar_orcamento(sanitizar(cabecalho), secoes,
-                                  args.orcamento_bytes) \
+    documento = aplicar_orcamento(cab_sanit, secoes, args.orcamento_bytes) \
         if args.orcamento_bytes > 0 else \
-        "\n".join([sanitizar(cabecalho)] + [texto for texto, _ in secoes])
+        "\n".join([cab_sanit] + [texto for texto, _ in secoes])
     saida = Path(args.saida)
     saida.parent.mkdir(parents=True, exist_ok=True)
-    saida.write_text(documento, encoding="utf-8")
+    # newline="\n": em Windows o write_text converteria \n em \r\n e o
+    # arquivo em disco estouraria o orcamento medido em LF.
+    saida.write_text(documento, encoding="utf-8", newline="\n")
     print(f"prompt gravado em {saida} "
           f"({len(documento)} caracteres, {len(fontes)} fontes, "
           f"{len(surefire)} relatorios surefire, diff: {rotulo_diff})")
