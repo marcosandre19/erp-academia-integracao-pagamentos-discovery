@@ -139,7 +139,8 @@ minuto do free tier):
 - `parecer-sem-contexto.md` — prompt padrão;
 - `parecer-com-contexto.md` — mesmo prompt + `docs/lacunas.md` e
   `docs/decisoes.md` anexados (sanitizados e truncados em
-  `MAX_BYTES_ANEXO`, 8KB cada), com a seção adicional obrigatória
+  `MAX_BYTES_ANEXO`; default do script 8KB, **4KB no CI** — ver orçamento
+  abaixo), com a seção adicional obrigatória
   **"## Relação com decisões documentadas"**: se a correção interage com
   LC12 (DLQ × registro de idempotência) ou LC13 (idempotência por evento
   ou por efeito), o parecer deve dizer qual pergunta o time precisa
@@ -152,11 +153,21 @@ Ambos vão para o artefato, para o `GITHUB_STEP_SUMMARY` e, quando o evento
 
 ### Orçamento de tamanho do prompt
 
-O free tier do Groq limita tokens por minuto, então a coleta aplica um
-orçamento ao `prompt-diagnostico.md` (`ORCAMENTO_PROMPT_BYTES`, default
-**16000 bytes**, ~4k tokens): excedido o limite, as seções são truncadas
-com marcação explícita na ordem **fontes → diff → falhas por último** (o
-recorte de falhas é o conteúdo mais crítico e cai por último).
+O free tier do Groq limita tokens por minuto (TPM 8000 para o modelo
+usado), então a coleta aplica um orçamento ao `prompt-diagnostico.md`
+(`ORCAMENTO_PROMPT_BYTES`, default **16000 bytes**, ~4k tokens): excedido
+o limite, as seções são truncadas com marcação explícita na ordem
+**fontes → diff → falhas por último** (o recorte de falhas é o conteúdo
+mais crítico e cai por último).
+
+Atenção à aritmética do 413: o Groq estima **entrada + `max_tokens` da
+saída** contra o TPM e responde **413** (request too large) quando a soma
+estoura — diferente do 429, o 413 não se resolve esperando (o retry não
+encolhe a requisição), só reduzindo o payload. Com os anexos no default de
+8KB cada, o `parecer-com-contexto` chegou a ~8,5k tokens estimados
+(entrada ~6,4k + 2048 de saída) contra o limite de 8000; por isso o job
+`ai-diagnosis` dos dois CIs fixa `MAX_BYTES_ANEXO=4000`, cortando ~2k
+tokens da entrada (~6,5k estimados, folga ~1,5k).
 
 ### Segurança e LGPD (minimização)
 
@@ -175,3 +186,4 @@ recorte de falhas é o conteúdo mais crítico e cai por último).
 ## Resultados
 
 _(a preencher nas próximas etapas)_
+
