@@ -187,3 +187,5 @@ tokens da entrada (~6,5k estimados, folga ~1,5k).
 
 _(a preencher nas próximas etapas)_
 
+
+
