@@ -5,6 +5,9 @@ name: devops-genai
 
 on:
   pull_request:
+    # labeled/unlabeled: a label "inject-bug" liga/desliga a injeção de
+    # falha no job test; os três primeiros são os defaults do gatilho.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
   workflow_dispatch:
     inputs:
       inject_bug:
@@ -22,9 +25,9 @@ jobs:
     env:
       # inject_bug é o nome voltado a quem dispara o pipeline; o stub lê a
       # config EVENT_REGISTRY_MODE (ver miniprojeto-devops-genai/README.md).
-      # Em workflow_dispatch, inject_bug=true vira "deferred"; em
-      # pull_request fica sempre "sync" (padrão).
-      EVENT_REGISTRY_MODE: ${{ (github.event_name == 'workflow_dispatch' && inputs.inject_bug == true) && 'deferred' || 'sync' }}
+      # Vira "deferred" em workflow_dispatch com inject_bug=true OU em
+      # pull_request com a label "inject-bug"; senão "sync" (padrão).
+      EVENT_REGISTRY_MODE: ${{ ((github.event_name == 'workflow_dispatch' && inputs.inject_bug == true) || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'inject-bug'))) && 'deferred' || 'sync' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -70,15 +73,17 @@ jobs:
           name: resultado-testes
           path: resultado-testes
 
-      # Gera diagnostico/prompt-diagnostico.md (contexto sanitizado) e, se o
-      # claude CLI existir no runner, diagnostico/parecer-diagnostico.md —
-      # publicado no step summary e, em PR, como comentário via gh api.
-      # Sem o CLI o job NÃO falha: o prompt vira artefato para gerar o
-      # parecer localmente (ver miniprojeto-devops-genai/README.md).
+      # Gera os prompts sanitizados e dois pareceres (sem/com contexto de
+      # decisões) via API do Groq (secret GROQ_API_KEY); publica no step
+      # summary e, em PR, como UM comentário via gh api. Sem a chave (e sem
+      # claude CLI) o job NÃO falha: os prompts viram artefato para gerar
+      # os pareceres localmente (ver miniprojeto-devops-genai/README.md).
       - name: Diagnóstico por IA
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          # MODEL_GROQ: openai/gpt-oss-120b   # default do script
         run: bash miniprojeto-devops-genai/agente/diagnostico.sh resultado-testes/maven-test.log
 
       - name: Publicar prompt e parecer do diagnóstico

@@ -25,10 +25,11 @@ miniprojeto-devops-genai/
   `mvn -f forum-testes-integracao/stub/pom.xml test` com `tee` + `set -o pipefail`
   (o exit code do Maven reprova o job) e publica `maven-test.log` e os
   relatórios surefire como artefato **sempre** (`if: always()`).
-- **Input `inject_bug` / variável `INJECT_BUG`**: em `workflow_dispatch` vem
-  do input `inject_bug` (default `false`); em `pull_request` é sempre `false`.
-  O job traduz `true` para `EVENT_REGISTRY_MODE=deferred`, a config que o
-  stub lê (ver seção abaixo).
+- **Injeção de falha**: `EVENT_REGISTRY_MODE=deferred` é exportado no job
+  `test` quando (a) `workflow_dispatch` com input `inject_bug=true`, ou
+  (b) `pull_request` cujo PR tem a label **`inject-bug`** (o gatilho inclui
+  `labeled`/`unlabeled`, então colocar/tirar a label já dispara nova
+  execução). Caso contrário, `sync` (padrão). Ver seção abaixo.
 - **Job `ai-diagnosis`**: só roda em falha (`if: failure()` / `when: on_failure`),
   baixa o artefato do log e chama `agente/diagnostico.sh` (detalhes na seção
   "Agente de diagnóstico" abaixo). O diretório `diagnostico/` (prompt e, se
@@ -66,9 +67,11 @@ Uso local:
 EVENT_REGISTRY_MODE=deferred mvn -f forum-testes-integracao/stub/pom.xml test
 ```
 
-No GitHub Actions a falha vem do input `inject_bug` do `workflow_dispatch`;
-no GitLab CI, da variável `INJECT_BUG` de um pipeline manual — em ambos o
-job `test` exporta `EVENT_REGISTRY_MODE` (`deferred` se `true`, senão `sync`).
+No GitHub Actions a falha vem do input `inject_bug` do `workflow_dispatch`
+**ou** da label `inject-bug` aplicada ao PR (o gatilho de `pull_request`
+inclui `labeled`/`unlabeled`); no GitLab CI, da variável `INJECT_BUG` de um
+pipeline manual. Em todos os casos o job `test` exporta
+`EVENT_REGISTRY_MODE` (`deferred` quando a injeção está ligada, senão `sync`).
 
 A flag é lida uma única vez na construção do controller; a documentação do
 seu propósito fica **apenas aqui**, de propósito: o diagnóstico por IA deve
@@ -95,31 +98,79 @@ ordem:
    `password=` etc.), e-mails e caminhos de usuário (`/home/...`,
    `C:\Users\...`) são mascarados.
 
-**`diagnostico.sh`** envia o prompt ao Claude via `claude -p` (modo não
-interativo), com as instruções fixas de `instrucoes-parecer.md` — resposta
-obrigatoriamente nas seções `## Resumo`, `## Evidências (citando linhas do
-log)`, `## Causa-raiz`, `## Correção sugerida (diff mínimo)`, `## Como
-validar`, `## Riscos e premissas`, `## Confiança (alta/média/baixa + por
-quê)`, e com as regras: não alterar/sugerir alterar testes para passarem
-(hipótese de teste errado vai em Riscos); se a correção depender de decisão
-de negócio não tomada, apontá-la e PARAR; não inventar números, SLAs ou
-comportamento não evidenciado.
+**`diagnostico.sh`** gera o parecer com esta cadeia de motores:
 
-O parecer vai para o `GITHUB_STEP_SUMMARY` e, quando o evento é
-`pull_request`, como comentário no PR via `gh api` com o `GITHUB_TOKEN`.
+1. **Groq (caminho do CI)** — se `GROQ_API_KEY` está presente, chama o
+   endpoint OpenAI-compatible `https://api.groq.com/openai/v1/chat/completions`
+   via `curl`, com `instrucoes-parecer.md` como mensagem *system* e o
+   prompt como *user*. Modelo em `MODEL_GROQ` (default
+   **`openai/gpt-oss-120b`**), `max_tokens` 2048, timeout de 120s e, em
+   HTTP 429, **uma** retentativa após espera (`GROQ_RETRY_ESPERA`, 70s).
+   Em erro HTTP só o código e o `error.message` vão para o log — nunca a
+   chave ou headers.
+2. **claude CLI** — sem a chave, usa `claude -p` se existir (uso local).
+3. **Fallback** — sem nenhum motor (ou se as chamadas falharem), **o job
+   não falha**: os prompts sanitizados vão para o artefato `diagnostico` e
+   o summary explica como gerar os pareceres localmente:
 
-### Sem claude CLI no runner (caminho usado neste projeto)
+   ```bash
+   # baixe o artefato "diagnostico" da execução reprovada e rode:
+   claude -p "$(cat miniprojeto-devops-genai/agente/instrucoes-parecer.md)" \
+       < prompt-diagnostico.md > parecer-sem-contexto.md
+   claude -p "$(cat instrucoes-com-contexto.md)" \
+       < prompt-com-contexto.md > parecer-com-contexto.md
+   ```
 
-Se o `claude` CLI não está disponível no runner, **o job não falha**: o
-`prompt-diagnostico.md` é publicado no artefato `diagnostico` e o step
-summary registra o aviso. O parecer é então gerado localmente — este é o
-caminho adotado aqui, já que o runner não tem o CLI nem credenciais de API:
+As instruções fixas (`instrucoes-parecer.md`) exigem resposta nas seções
+`## Resumo`, `## Evidências (citando linhas do log)`, `## Causa-raiz`,
+`## Correção sugerida (diff mínimo)`, `## Como validar`, `## Riscos e
+premissas`, `## Confiança (alta/média/baixa + por quê)`, com as regras:
+não alterar/sugerir alterar testes para passarem (hipótese de teste errado
+vai em Riscos); se a correção depender de decisão de negócio não tomada,
+apontá-la e PARAR; não inventar números, SLAs ou comportamento não
+evidenciado.
 
-```bash
-# baixe o artefato "diagnostico" da execução reprovada e rode:
-claude -p "$(cat miniprojeto-devops-genai/agente/instrucoes-parecer.md)" \
-    < prompt-diagnostico.md > parecer-diagnostico.md
-```
+### Dois pareceres por execução
+
+Cada falha gera **dois** pareceres (com pausa de `PAUSA_ENTRE_CHAMADAS`,
+default 60s, entre as chamadas ao Groq, por causa do limite de tokens por
+minuto do free tier):
+
+- `parecer-sem-contexto.md` — prompt padrão;
+- `parecer-com-contexto.md` — mesmo prompt + `docs/lacunas.md` e
+  `docs/decisoes.md` anexados (sanitizados e truncados em
+  `MAX_BYTES_ANEXO`, 8KB cada), com a seção adicional obrigatória
+  **"## Relação com decisões documentadas"**: se a correção interage com
+  LC12 (DLQ × registro de idempotência) ou LC13 (idempotência por evento
+  ou por efeito), o parecer deve dizer qual pergunta o time precisa
+  responder antes de aplicá-la.
+
+Ambos vão para o artefato, para o `GITHUB_STEP_SUMMARY` e, quando o evento
+é `pull_request`, como **um único comentário** no PR via `gh api` com o
+`GITHUB_TOKEN`, truncado em 60K e identificado no topo como
+"🤖 Diagnóstico automático (GenAI) — análise sujeita a revisão humana".
+
+### Orçamento de tamanho do prompt
+
+O free tier do Groq limita tokens por minuto, então a coleta aplica um
+orçamento ao `prompt-diagnostico.md` (`ORCAMENTO_PROMPT_BYTES`, default
+**16000 bytes**, ~4k tokens): excedido o limite, as seções são truncadas
+com marcação explícita na ordem **fontes → diff → falhas por último** (o
+recorte de falhas é o conteúdo mais crítico e cai por último).
+
+### Segurança e LGPD (minimização)
+
+- `GROQ_API_KEY` entra **somente** via secret (`Settings > Secrets` no
+  GitHub; variável de CI/CD mascarada/protegida no GitLab) — nunca em
+  arquivo versionado; o script não ecoa a chave nem headers no log.
+- O envio ao Groq é um envio real a terceiro, então a **sanitização roda
+  antes**: o prompt é gravado já mascarado pela `coleta_contexto.py`
+  (segredos, e-mails, caminhos de usuário) e os anexos de `docs/` passam
+  pelas mesmas máscaras antes de entrar no `prompt-com-contexto.md`.
+- Minimização: vai para o provedor apenas o recorte de falhas, o diff e os
+  fontes relacionados — nunca o log inteiro ou o repositório; os dados do
+  stub são fictícios (sem PII de alunos reais), conforme a regra LGPD do
+  projeto.
 
 ## Resultados
 

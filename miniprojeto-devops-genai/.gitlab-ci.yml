@@ -46,7 +46,8 @@ ai_diagnosis:
   script:
     # o coletor de contexto é Python; a imagem maven não traz python3
     - command -v python3 >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq python3 >/dev/null)
-    # sem claude CLI o script não falha: grava o prompt como artefato
+    # GROQ_API_KEY: variável de CI/CD mascarada e protegida do projeto;
+    # sem ela (e sem claude CLI) o script não falha — prompts viram artefato
     - bash miniprojeto-devops-genai/agente/diagnostico.sh maven-test.log
   artifacts:
     when: always

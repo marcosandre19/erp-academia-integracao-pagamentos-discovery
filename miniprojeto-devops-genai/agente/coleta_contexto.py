@@ -180,6 +180,32 @@ def expandir_relacionados(iniciais, indice, profundidade_max=3):
     return ordem
 
 
+def aplicar_orcamento(cabecalho, secoes, orcamento):
+    """Reduz o documento ao orcamento de bytes truncando as secoes menos
+    criticas primeiro (indices em ORDEM_DE_CORTE), com marcacao explicita.
+    secoes: lista de (texto, rotulo) na ordem do documento."""
+    ORDEM_DE_CORTE = [2, 1, 0]  # fontes primeiro, diff depois, falhas por ultimo
+    textos = [texto for texto, _ in secoes]
+
+    def total():
+        return len("\n".join([cabecalho] + textos).encode("utf-8", errors="replace"))
+
+    for indice in ORDEM_DE_CORTE:
+        if total() <= orcamento:
+            break
+        if indice >= len(textos):
+            continue
+        excesso = total() - orcamento
+        tamanho = len(textos[indice].encode("utf-8", errors="replace"))
+        # 400 bytes de folga para a marca de truncamento
+        novo_tamanho = max(tamanho - excesso - 400, 0)
+        if novo_tamanho < tamanho:
+            textos[indice] = truncar(
+                textos[indice], novo_tamanho,
+                f"secao '{secoes[indice][1]}' (orcamento de tamanho do prompt)")
+    return "\n".join([cabecalho] + textos)
+
+
 def rodar_git(args, repo_root):
     try:
         return subprocess.run(["git"] + args, cwd=str(repo_root),
@@ -219,6 +245,10 @@ def main():
     parser.add_argument("--surefire-dir", help="target/surefire-reports baixado")
     parser.add_argument("--repo-root", help="raiz do repositorio (default: git)")
     parser.add_argument("--saida", default="prompt-diagnostico.md")
+    parser.add_argument("--orcamento-bytes", type=int, default=0,
+                        help="limite total do documento em bytes (0 = sem "
+                             "limite); corta fontes primeiro, depois diff, "
+                             "falhas por ultimo, com marcacao explicita")
     args = parser.parse_args()
 
     log_path = Path(args.log)
@@ -250,27 +280,34 @@ def main():
 
     rotulo_diff, diff = obter_diff(repo_root)
 
-    partes = [
+    cabecalho = "\n".join([
         "# Contexto de diagnostico — falha na suite do stub\n",
         "Gerado por coleta_contexto.py a partir dos artefatos do job `test`. "
         "Conteudo sanitizado: segredos, e-mails e caminhos de usuario "
         "mascarados.\n",
+    ])
+
+    partes_falhas = [
         "## 1. Falhas da suite (recorte do log e stack traces)\n",
         "```text\n" + truncar(texto_falhas, MAX_BYTES_LOG, "recorte do log")
         + "\n```\n",
     ]
     for nome_arquivo, texto in surefire:
-        partes.append(f"### surefire: {nome_arquivo}\n```text\n"
-                      + truncar(texto, MAX_BYTES_SUREFIRE, nome_arquivo)
-                      + "\n```\n")
+        partes_falhas.append(f"### surefire: {nome_arquivo}\n```text\n"
+                             + truncar(texto, MAX_BYTES_SUREFIRE, nome_arquivo)
+                             + "\n```\n")
 
-    partes.append(f"## 2. Diff ({rotulo_diff})\n")
-    partes.append("```diff\n" + truncar(diff, MAX_BYTES_DIFF, "diff") + "\n```\n")
+    partes_diff = [
+        f"## 2. Diff ({rotulo_diff})\n",
+        "```diff\n" + truncar(diff, MAX_BYTES_DIFF, "diff") + "\n```\n",
+    ]
 
-    partes.append("## 3. Fontes citados nos stack traces e modulos relacionados\n")
-    partes.append("Inclui tambem os modulos importados e os vizinhos de pacote "
-                  "dos arquivos citados: a causa-raiz pode nao estar no "
-                  "traceback.\n")
+    partes_fontes = [
+        "## 3. Fontes citados nos stack traces e modulos relacionados\n",
+        "Inclui tambem os modulos importados e os vizinhos de pacote "
+        "dos arquivos citados: a causa-raiz pode nao estar no "
+        "traceback.\n",
+    ]
     total = 0
     for fonte in fontes:
         try:
@@ -284,12 +321,23 @@ def main():
         corpo = truncar(texto, MAX_BYTES_POR_FONTE, str(rel))
         total += len(corpo.encode("utf-8", errors="replace"))
         if total > MAX_BYTES_FONTES_TOTAL:
-            partes.append("_(limite de tamanho das fontes atingido; demais "
-                          "arquivos omitidos)_\n")
+            partes_fontes.append("_(limite de tamanho das fontes atingido; "
+                                 "demais arquivos omitidos)_\n")
             break
-        partes.append(f"### {str(rel).replace(os.sep, '/')}\n```java\n{corpo}\n```\n")
+        partes_fontes.append(
+            f"### {str(rel).replace(os.sep, '/')}\n```java\n{corpo}\n```\n")
 
-    documento = sanitizar("\n".join(partes))
+    # Sanitiza ANTES de qualquer uso do documento (o prompt pode ser enviado
+    # a um provedor externo); o orcamento e aplicado sobre o texto ja limpo.
+    secoes = [
+        (sanitizar("\n".join(partes_falhas)), "falhas da suite"),
+        (sanitizar("\n".join(partes_diff)), "diff"),
+        (sanitizar("\n".join(partes_fontes)), "fontes"),
+    ]
+    documento = aplicar_orcamento(sanitizar(cabecalho), secoes,
+                                  args.orcamento_bytes) \
+        if args.orcamento_bytes > 0 else \
+        "\n".join([sanitizar(cabecalho)] + [texto for texto, _ in secoes])
     saida = Path(args.saida)
     saida.parent.mkdir(parents=True, exist_ok=True)
     saida.write_text(documento, encoding="utf-8")
