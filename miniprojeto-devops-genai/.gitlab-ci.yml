@@ -41,6 +41,10 @@ ai_diagnosis:
   stage: ai_diagnosis
   image: maven:3.9-eclipse-temurin-17
   when: on_failure
+  variables:
+    # evita 413 no free tier do Groq: a estimativa entrada + max_tokens
+    # precisa caber no TPM de 8000 (ver README, "Orçamento de tamanho")
+    MAX_BYTES_ANEXO: "4000"
   dependencies:
     - test # baixa os artefatos do job test (maven-test.log + surefire)
   script:

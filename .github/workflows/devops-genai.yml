@@ -84,6 +84,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           # MODEL_GROQ: openai/gpt-oss-120b   # default do script
+          # O Groq estima entrada + max_tokens (2048) contra o TPM de 8000
+          # do free tier e responde 413 quando estoura — e 413 não se
+          # resolve com retry, só reduzindo o payload. Com os anexos no
+          # default de 8KB cada a estimativa chegou a ~8,5k tokens; com
+          # 4KB cada a entrada cai ~2k tokens (~6,5k no total, folga ~1,5k).
+          MAX_BYTES_ANEXO: "4000"
         run: bash miniprojeto-devops-genai/agente/diagnostico.sh resultado-testes/maven-test.log
 
       - name: Publicar prompt e parecer do diagnóstico
