@@ -1,0 +1,72 @@
+# Miniprojeto DevOps com GenAI — pipeline de testes + diagnóstico por IA.
+# O laboratório oficial da disciplina é GitLab CI; o equivalente demonstrativo
+# está em miniprojeto-devops-genai/.gitlab-ci.yml.
+name: devops-genai
+
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      inject_bug:
+        description: "Injetar bug proposital no stub (INJECT_BUG=true)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      # Em workflow_dispatch vale o input; em pull_request fica false.
+      INJECT_BUG: ${{ github.event_name == 'workflow_dispatch' && inputs.inject_bug == true }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: JDK 17 (Temurin) + cache Maven
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+
+      - name: Executar testes do stub
+        shell: bash
+        # pipefail garante que o exit code reprovador é o do Maven, não o do tee
+        run: |
+          set -o pipefail
+          mvn -B -f forum-testes-integracao/stub/pom.xml test 2>&1 | tee maven-test.log
+
+      - name: Publicar log e relatórios surefire
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: resultado-testes
+          path: |
+            maven-test.log
+            forum-testes-integracao/stub/target/surefire-reports/
+          if-no-files-found: warn
+
+  ai-diagnosis:
+    needs: test
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Baixar log dos testes
+        uses: actions/download-artifact@v4
+        with:
+          name: resultado-testes
+          path: resultado-testes
+
+      - name: Diagnóstico por IA
+        shell: bash
+        # TODO: script criado na próxima etapa do miniprojeto
+        # (miniprojeto-devops-genai/agente/diagnostico.sh). Recebe o
+        # caminho do log do Maven como argumento.
+        run: bash miniprojeto-devops-genai/agente/diagnostico.sh resultado-testes/maven-test.log

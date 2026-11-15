@@ -1,0 +1,46 @@
+# Equivalente GitLab CI do workflow .github/workflows/devops-genai.yml.
+# Arquivo DEMONSTRATIVO: o laboratório oficial da disciplina roda em GitLab,
+# mas este repositório vive no GitHub — para usar de verdade, mova este
+# arquivo para a raiz de um projeto GitLab como .gitlab-ci.yml.
+#
+# Para simular o "workflow_dispatch com inject_bug": rode um pipeline manual
+# (CI/CD > Pipelines > Run pipeline) definindo a variável INJECT_BUG=true.
+
+stages:
+  - test
+  - ai_diagnosis
+
+variables:
+  INJECT_BUG: "false" # sobrescrevível em pipeline manual
+  MAVEN_OPTS: "-Dmaven.repo.local=$CI_PROJECT_DIR/.m2/repository"
+
+test:
+  stage: test
+  image: maven:3.9-eclipse-temurin-17
+  cache:
+    key: maven-repo
+    paths:
+      - .m2/repository
+  script:
+    # pipefail garante que o exit code reprovador é o do Maven, não o do tee
+    - set -o pipefail
+    - mvn -B -f forum-testes-integracao/stub/pom.xml test 2>&1 | tee maven-test.log
+  artifacts:
+    when: always
+    expire_in: 1 week
+    paths:
+      - maven-test.log
+      - forum-testes-integracao/stub/target/surefire-reports/
+    reports:
+      junit: forum-testes-integracao/stub/target/surefire-reports/TEST-*.xml
+
+ai_diagnosis:
+  stage: ai_diagnosis
+  image: maven:3.9-eclipse-temurin-17
+  when: on_failure
+  dependencies:
+    - test # baixa os artefatos do job test (maven-test.log)
+  script:
+    # TODO: script criado na próxima etapa do miniprojeto
+    # (miniprojeto-devops-genai/agente/diagnostico.sh)
+    - bash miniprojeto-devops-genai/agente/diagnostico.sh maven-test.log
